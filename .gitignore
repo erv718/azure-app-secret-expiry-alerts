@@ -1,5 +1,7 @@
 # Environment
 .env
+.env*
+!.env.template
 .venv/
 venv/
 env/
@@ -19,3 +21,12 @@ Thumbs.db
 
 # Logs
 *.log
+
+# State file
+.last_run_state.json
+
+# Team routing config (contains webhook URLs)
+channels.json
+
+# Generated reports
+*.xlsx

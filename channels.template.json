@@ -1,0 +1,17 @@
+{
+  "_comment": "Copy this file to channels.json and fill in your teams. channels.json is gitignored because webhook URLs are secrets. Each team gets alerts only for the apps it matches; the env-configured SLACK_WEBHOOK_URL / email channel always receives the full report. An app matches a team if its client ID is listed in app_ids OR its display name contains any app_name_patterns entry (case-insensitive). slack_channel_id is optional and only needed for Excel report uploads (requires SLACK_BOT_TOKEN in .env).",
+  "teams": [
+    {
+      "name": "Example Team",
+      "slack_webhook_url": "PASTE-YOUR-SLACK-INCOMING-WEBHOOK-URL-HERE",
+      "slack_channel_id": "C00000000",
+      "app_ids": [
+        "00000000-0000-0000-0000-000000000000"
+      ],
+      "app_name_patterns": [
+        "my app prefix"
+      ],
+      "action_hint": "Optional free-text instructions appended to this team's alerts, e.g. where to rotate the secret and what to update afterwards."
+    }
+  ]
+}

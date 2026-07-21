@@ -51,8 +51,11 @@ All configuration is done via the `.env` file (copied from `.env.template`).
 | `FILTER_EXCLUDE_APP_IDS` | No | Skip these App (client) IDs |
 | `FILTER_EXCLUDE_NAMES` | No | Skip apps whose name contains these patterns |
 | `ALERT_THRESHOLD_DAYS` | No | Comma-separated days (default: `90,60,30,14,7`) |
+| `STATE_FILE_PATH` | No | Where to store change-detection state (default: `.last_run_state.json` next to the script) |
 | `SLACK_ENABLED` | No | `true` to enable Slack alerts |
 | `SLACK_WEBHOOK_URL` | Slack | Slack incoming webhook URL |
+| `SLACK_BOT_TOKEN` | No | Bot token (`xoxb-...`) with `files:write` + `chat:write`, for Excel report uploads |
+| `SLACK_CHANNEL_ID` | No | Channel ID the Excel report is uploaded to |
 | `EMAIL_ENABLED` | No | `true` to enable email alerts |
 | `SMTP_HOST` | Email | SMTP server hostname |
 | `SMTP_PORT` | Email | SMTP port (default: `587`) |
@@ -61,6 +64,28 @@ All configuration is done via the `.env` file (copied from `.env.template`).
 | `SMTP_USE_TLS` | Email | `true` to use STARTTLS (default: `true`) |
 | `EMAIL_FROM` | Email | Sender email address |
 | `EMAIL_TO` | Email | Comma-separated recipient addresses |
+
+### Team channel routing (optional)
+
+Route alerts for specific apps to additional Slack channels (one per team)
+while the main channel keeps receiving the full report:
+
+```bash
+cp channels.template.json channels.json
+```
+
+Each team entry has its own `slack_webhook_url`, an optional
+`slack_channel_id` for Excel uploads, and matches apps by exact client ID
+(`app_ids`) and/or case-insensitive name substring (`app_name_patterns`).
+`channels.json` is gitignored since webhook URLs are secrets.
+
+```bash
+python monitor.py --dry-run        # preview which apps route to which channel
+python monitor.py --test-channels  # send a test message to every channel
+```
+
+Notification state is tracked per channel, so each channel only gets a new
+message when something changed for its apps.
 
 ## Deployment
 
@@ -120,10 +145,17 @@ Azure Automation provides serverless scheduling with native managed identity sup
    - `azure-identity`
    - `requests`
    - `python-dotenv`
+   - `openpyxl`
 
 5. **Create a Python Runbook**, paste the contents of `monitor.py`, and set environment variables in the Automation Account's variable assets or directly in the Runbook configuration. Set `AZURE_AUTH_METHOD=managed_identity`.
 
 6. **Link a Schedule** (e.g., daily at 8:00 AM UTC) to the Runbook.
+
+> **Note on state**: change suppression stores state in `.last_run_state.json`
+> next to the script. Serverless environments (Automation, Functions, Lambda)
+> have ephemeral working directories, so either point `STATE_FILE_PATH` at
+> persistent storage (mounted file share, EFS) or accept that every run sends
+> a full report.
 
 #### Option B: Azure Functions (Timer Trigger)
 
