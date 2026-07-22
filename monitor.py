@@ -535,25 +535,25 @@ def _format_alert_lines(alerts: list[dict], thresholds: list[int]) -> list[str]:
         lines.append("🚨 *Needs action*")
         for a in recent_expired:
             ago = "today" if a["days_left"] == -0 else f"*{-a['days_left']} day(s) ago*"
-            created = f" — created {_friendly_date(a['created'])}" if a.get("created") else ""
+            created = f" - created {_friendly_date(a['created'])}" if a.get("created") else ""
             lines.append(
-                f"⛔  *{_mrkdwn_escape(a['app_name'])}* — {_mrkdwn_escape(a['credential_name'])} "
-                f"({a['credential_type']}) — expired {ago} ({_friendly_date(a['expires'])}){created}"
+                f"⛔  *{_mrkdwn_escape(a['app_name'])}* - {_mrkdwn_escape(a['credential_name'])} "
+                f"({a['credential_type']}) - expired {ago} ({_friendly_date(a['expires'])}){created}"
             )
         for a in upcoming:
             d = a["days_left"]
             when = "*today*" if d == 0 else f"in *{d} day(s)*"
             dot = emoji.get(_bucket_key(d, thresholds), "🔵")
-            created = f" — created {_friendly_date(a['created'])}" if a.get("created") else ""
+            created = f" - created {_friendly_date(a['created'])}" if a.get("created") else ""
             lines.append(
-                f"{dot}  *{_mrkdwn_escape(a['app_name'])}* — {_mrkdwn_escape(a['credential_name'])} "
-                f"({a['credential_type']}) — expires {when} ({_friendly_date(a['expires'])}){created}"
+                f"{dot}  *{_mrkdwn_escape(a['app_name'])}* - {_mrkdwn_escape(a['credential_name'])} "
+                f"({a['credential_type']}) - expires {when} ({_friendly_date(a['expires'])}){created}"
             )
 
     if stale:
         if lines:
             lines.append("")
-        lines.append(f"🗑️ *Expired more than 30 days ago ({len(stale)})* — "
+        lines.append(f"🗑️ *Expired more than 30 days ago ({len(stale)})* - "
                      "likely unused; consider deleting these from Azure:")
         # Compact flowing name list, one app once (with a count when it has
         # several dead credentials), wrapped into chunk-friendly lines.
@@ -573,7 +573,7 @@ def _format_alert_lines(alerts: list[dict], thresholds: list[int]) -> list[str]:
         if row:
             lines.append(row)
         if len(names) > max_names:
-            lines.append(f"…and {len(names) - max_names} more — full list in the Excel report")
+            lines.append(f"...and {len(names) - max_names} more - full list in the Excel report")
     return lines
 
 
@@ -635,7 +635,7 @@ def send_slack_alert(webhook_url: str, title: str, alerts: list[dict], buckets: 
     if first_run:
         blocks.append({
             "type": "context",
-            "elements": [{"type": "mrkdwn", "text": "First run — baseline established. "
+            "elements": [{"type": "mrkdwn", "text": "First run - baseline established. "
                           "Future messages arrive only when something changes."}],
         })
     elif changes:
