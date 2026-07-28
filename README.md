@@ -93,7 +93,7 @@ message when something changed for its apps.
 
 Run the monitor on any machine with Python 3.10+ and network access to Microsoft Graph.
 
-**Linux (cron)** — run daily at 8 AM:
+**Linux (cron)** - run daily at 8 AM:
 
 ```bash
 0 8 * * * cd /path/to/azure-app-secret-expiry-alerts && /path/to/python monitor.py >> /var/log/secret-expiry.log 2>&1
