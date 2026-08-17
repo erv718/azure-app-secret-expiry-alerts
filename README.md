@@ -225,6 +225,15 @@ The monitoring identity needs the Microsoft Graph **Application.Read.All** appli
 3. Grant admin consent
 4. Create a client secret and note the tenant ID, client ID, and secret value
 
+## Testing
+
+The test suite needs no Azure tenant and no Slack workspace - Graph calls are
+stubbed and Slack webhooks point at a local mock server:
+
+```bash
+python tests/test_monitor.py
+```
+
 ## License
 
 MIT
