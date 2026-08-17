@@ -26,6 +26,7 @@ from azure.identity import ClientSecretCredential, ManagedIdentityCredential
 from dotenv import load_dotenv
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
+from openpyxl.worksheet.properties import PageSetupProperties
 
 load_dotenv()
 
@@ -51,6 +52,10 @@ SECTION_CHAR_BUDGET = 2900
 
 # Characters openpyxl refuses to write into a cell.
 _ILLEGAL_XLSX_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+# Credentials expired longer ago than this are treated as stale leftovers:
+# compacted in Slack and quarantined to the cleanup sheet in the Excel report.
+STALE_CUTOFF_DAYS = 30
 
 # Graph emits 7-digit fractional seconds; fromisoformat before Python 3.11
 # only accepts exactly 3 or 6 digits.
@@ -431,58 +436,131 @@ def _safe_cell(ws, row: int, col: int, value):
     return ws.cell(row=row, column=col, value=value)
 
 
-def _generate_excel(alerts: list[dict]) -> str:
-    """Generate an Excel report and return the file path."""
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Credential Expiry Report"
+# Shared workbook styles (created once, reused across every cell write).
+_TITLE_FONT = Font(bold=True, size=14)
+_NOTE_FONT = Font(italic=True, color="808080")
+_HEADER_FONT = Font(bold=True, color="FFFFFF")
+_HEADER_FILL = PatternFill(start_color="2F5496", end_color="2F5496", fill_type="solid")
+_LEFT = Alignment(horizontal="left")
+_CENTER = Alignment(horizontal="center")
+_MONO_GRAY = Font(name="Consolas", size=9, color="808080")
+_MONO = Font(name="Consolas", size=10)
+_EXPIRED_ROW_FILL = PatternFill(start_color="FDE7E9", end_color="FDE7E9", fill_type="solid")
+_BAND_FILL = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
+_STATUS_CHIPS = {
+    "Rotate now": (PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid"),
+                   Font(bold=True, color="9C0006")),
+    "Rotate this month": (PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid"),
+                          Font(color="9C6500")),
+    "Plan rotation": (PatternFill(start_color="DDEBF7", end_color="DDEBF7", fill_type="solid"),
+                      Font(color="1F4E78")),
+}
 
-    headers = ["App Name", "App ID", "Type", "Credential Name", "Created", "Expires", "Days Left", "Status"]
-    header_font = Font(bold=True, color="FFFFFF")
-    header_fill = PatternFill(start_color="2F5496", end_color="2F5496", fill_type="solid")
 
+def _date_cell(ws, row: int, col: int, iso_date: str):
+    """Write a real date cell so Excel can sort/filter it; falls back to text."""
+    try:
+        value = datetime.strptime(iso_date, "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return _safe_cell(ws, row, col, iso_date or "")
+    cell = ws.cell(row=row, column=col, value=value)
+    cell.number_format = "yyyy-mm-dd"
+    cell.alignment = _CENTER
+    return cell
+
+
+def _sheet_skeleton(ws, title: str, intro: str, headers: list[str]) -> None:
+    """Shared layout: title in A1, gray intro in A2, header row 4, data row 5+."""
+    ws.sheet_view.showGridLines = False
+    ws.cell(row=1, column=1, value=title).font = _TITLE_FONT
+    ws.cell(row=2, column=1, value=intro).font = _NOTE_FONT
     for col, header in enumerate(headers, 1):
-        cell = ws.cell(row=1, column=col, value=header)
-        cell.font = header_font
-        cell.fill = header_fill
-        cell.alignment = Alignment(horizontal="left")
+        cell = ws.cell(row=4, column=col, value=header)
+        cell.font = _HEADER_FONT
+        cell.fill = _HEADER_FILL
+        cell.alignment = _LEFT
 
-    red_font = Font(color="CC0000", bold=True)
-    amber_font = Font(color="CC7A00", bold=True)
-    blue_font = Font(color="0066CC")
 
-    for row, a in enumerate(alerts, 2):
+def _finish_sheet(ws, n_rows: int, widths: list[int], empty_note: str) -> None:
+    for i, width in enumerate(widths):
+        ws.column_dimensions[chr(ord("A") + i)].width = width
+    if n_rows:
+        ws.auto_filter.ref = f"A4:{chr(ord('A') + len(widths) - 1)}{4 + n_rows}"
+    else:
+        ws.cell(row=5, column=1, value=empty_note).font = _NOTE_FONT
+    ws.freeze_panes = "B5"
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
+    ws.print_title_rows = "4:4"
+
+
+def _generate_excel(alerts: list[dict]) -> str:
+    """Two-sheet workbook: 'Action Needed' (rotate these, most urgent first)
+    and a quarantined cleanup list of credentials expired long ago."""
+    wb = Workbook()
+    action = [a for a in alerts if a["days_left"] >= -STALE_CUTOFF_DAYS]
+    stale = [a for a in alerts if a["days_left"] < -STALE_CUTOFF_DAYS]
+
+    # --- Sheet 1: the ~handful of rows anyone must act on ---
+    ws = wb.active
+    ws.title = "Action Needed"
+    ws.sheet_properties.tabColor = "C00000"
+    n_expired = sum(1 for a in action if a["days_left"] < 0)
+    intro = (f"Generated {datetime.now(timezone.utc).strftime('%Y-%m-%d')} - "
+             f"{n_expired} recently expired, {len(action) - n_expired} expiring soon. "
+             "Rotate these, then reply in the Slack alert thread. "
+             "IT cleanup list is on the next tab.")
+    _sheet_skeleton(ws, "Credential rotation - action needed", intro,
+                    ["App Name", "Credential Name", "Type", "Expires", "Days Left", "Status", "App ID (for IT)"])
+
+    # Expired first (most recent at top), then live items soonest-first.
+    action.sort(key=lambda a: (a["days_left"] >= 0, abs(a["days_left"]), a["app_name"].lower()))
+    for i, a in enumerate(action):
+        row = 5 + i
         _safe_cell(ws, row, 1, a["app_name"])
-        _safe_cell(ws, row, 2, a["app_id"])
+        _safe_cell(ws, row, 2, a["credential_name"])
         _safe_cell(ws, row, 3, a["credential_type"])
-        _safe_cell(ws, row, 4, a["credential_name"])
-        _safe_cell(ws, row, 5, a.get("created", ""))
-        _safe_cell(ws, row, 6, a["expires"])
-        _safe_cell(ws, row, 7, a["days_left"])
+        _date_cell(ws, row, 4, a["expires"])
+        days = ws.cell(row=row, column=5, value=a["days_left"])
+        days.number_format = "0;[Red]-0"
+        d = a["days_left"]
+        status = "Rotate now" if d <= 7 else ("Rotate this month" if d <= 30 else "Plan rotation")
+        chip_fill, chip_font = _STATUS_CHIPS[status]
+        status_cell = _safe_cell(ws, row, 6, status)
+        status_cell.fill = chip_fill
+        status_cell.font = chip_font
+        status_cell.alignment = _CENTER
+        _safe_cell(ws, row, 7, a["app_id"]).font = _MONO_GRAY
+        if d < 0:
+            for col in (1, 2, 3, 4, 5, 7):
+                ws.cell(row=row, column=col).fill = _EXPIRED_ROW_FILL
+    _finish_sheet(ws, len(action), [38, 26, 12, 12, 10, 18, 38],
+                  "None today - nothing to rotate.")
 
-        if a["days_left"] < 0:
-            status = "EXPIRED"
-            font = red_font
-        elif a["days_left"] <= 7:
-            status = "Critical"
-            font = red_font
-        elif a["days_left"] <= 30:
-            status = "Warning"
-            font = amber_font
-        else:
-            status = "Notice"
-            font = blue_font
-
-        status_cell = _safe_cell(ws, row, 8, status)
-        status_cell.font = font
-
-    # Auto-width columns
-    for col in ws.columns:
-        max_len = max(len(str(cell.value or "")) for cell in col)
-        ws.column_dimensions[col[0].column_letter].width = min(max_len + 4, 50)
-
-    # Auto-filter
-    ws.auto_filter.ref = ws.dimensions
+    # --- Sheet 2: deletion candidates, grouped per app for one-portal-visit cleanup ---
+    ws2 = wb.create_sheet(f"Cleanup (Expired {STALE_CUTOFF_DAYS}+ Days)")
+    ws2.sheet_properties.tabColor = "808080"
+    _sheet_skeleton(ws2, f"Expired more than {STALE_CUTOFF_DAYS} days ago - deletion candidates",
+                    "IT use only - verify and delete in Entra ID. Non-IT team members can ignore this tab.",
+                    ["App Name", "App ID", "Type", "Credential Name", "Expired On", "Days Expired", "Created"])
+    stale.sort(key=lambda a: (a["app_name"].lower(), a["expires"]))
+    for i, a in enumerate(stale):
+        row = 5 + i
+        _safe_cell(ws2, row, 1, a["app_name"])
+        _safe_cell(ws2, row, 2, a["app_id"]).font = _MONO
+        _safe_cell(ws2, row, 3, a["credential_type"])
+        _safe_cell(ws2, row, 4, a["credential_name"])
+        _date_cell(ws2, row, 5, a["expires"])
+        ws2.cell(row=row, column=6, value=abs(a["days_left"])).number_format = "0"
+        if a.get("created"):
+            _date_cell(ws2, row, 7, a["created"])
+        if i % 2 == 1:
+            for col in range(1, 8):
+                ws2.cell(row=row, column=col).fill = _BAND_FILL
+    _finish_sheet(ws2, len(stale), [38, 38, 12, 26, 12, 12, 12],
+                  "None - no stale credentials to clean up.")
 
     fd, path = tempfile.mkstemp(suffix=".xlsx", prefix="credential_expiry_report_")
     os.close(fd)
@@ -524,10 +602,10 @@ def _format_alert_lines(alerts: list[dict], thresholds: list[int]) -> list[str]:
     anything expired more than 30 days ago is assumed stale and collapses to
     a compact name list (full detail stays in the Excel report/email)."""
     emoji = _bucket_emoji(thresholds)
-    recent_expired = sorted((a for a in alerts if -30 <= a["days_left"] < 0),
+    recent_expired = sorted((a for a in alerts if -STALE_CUTOFF_DAYS <= a["days_left"] < 0),
                             key=lambda a: a["days_left"], reverse=True)
     upcoming = sorted((a for a in alerts if a["days_left"] >= 0), key=lambda a: a["days_left"])
-    stale = sorted((a for a in alerts if a["days_left"] < -30),
+    stale = sorted((a for a in alerts if a["days_left"] < -STALE_CUTOFF_DAYS),
                    key=lambda a: a["days_left"], reverse=True)
 
     lines = []
@@ -553,7 +631,7 @@ def _format_alert_lines(alerts: list[dict], thresholds: list[int]) -> list[str]:
     if stale:
         if lines:
             lines.append("")
-        lines.append(f"🗑️ *Expired more than 30 days ago ({len(stale)})* - "
+        lines.append(f"🗑️ *Expired more than {STALE_CUTOFF_DAYS} days ago ({len(stale)})* - "
                      "likely unused; consider deleting these from Azure:")
         # Compact flowing name list, one app once (with a count when it has
         # several dead credentials), wrapped into chunk-friendly lines.

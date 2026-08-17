@@ -247,17 +247,31 @@ check("test-channels hit d365", "/hook/d365" in paths())
 check("test-channels message says test", all("test" in json.dumps(pl).lower() for _, pl in received))
 
 # ============================================================================
-print("\n--- Excel: formula injection + illegal chars neutralized ---")
+print("\n--- Excel: two-sheet layout, injection + illegal chars neutralized ---")
 from openpyxl import load_workbook  # noqa: E402
 alerts = monitor.check_expiry(fake_apps_v1(), [90, 60, 30, 14, 7])
+alerts.append({"app_name": "Ancient App", "app_id": "eeeeeeee-0000-0000-0000-000000000009",
+               "credential_type": "Secret", "credential_name": "old", "key_id": "old1",
+               "created": "2020-01-01", "expires": "2021-01-01", "days_left": -2000})
 xlsx = monitor._generate_excel(alerts)
 wb = load_workbook(xlsx)
-ws = wb.active
-formula_cells = [c.coordinate for row in ws.iter_rows() for c in row if c.data_type == "f"]
+check("action sheet first and active", wb.sheetnames[0] == "Action Needed"
+      and wb.active.title == "Action Needed")
+check("cleanup sheet present", any(s.startswith("Cleanup (Expired") for s in wb.sheetnames))
+ws = wb["Action Needed"]
+formula_cells = [c.coordinate for sh in wb.worksheets for row in sh.iter_rows() for c in row
+                 if c.data_type == "f"]
 check("no formula cells in workbook", not formula_cells, str(formula_cells))
-names = [ws.cell(row=r, column=1).value for r in range(2, ws.max_row + 1)]
+names = [ws.cell(row=r, column=1).value for r in range(5, ws.max_row + 1)]
 check("injected name kept as literal text", any(n and n.startswith("=HYPERLINK") for n in names))
 check("control char stripped", all("\x07" not in (n or "") for n in names))
+check("stale app quarantined off action sheet", "Ancient App" not in names)
+ws2 = wb[[s for s in wb.sheetnames if s.startswith("Cleanup")][0]]
+stale_names = [ws2.cell(row=r, column=1).value for r in range(5, ws2.max_row + 1)]
+check("stale app on cleanup sheet", "Ancient App" in stale_names)
+check("expires is a real date cell", ws.cell(row=5, column=4).is_date)
+check("most urgent expired leads action sheet", ws.cell(row=5, column=5).value is not None
+      and ws.cell(row=5, column=5).value < 0)
 os.unlink(xlsx)
 
 # ============================================================================
